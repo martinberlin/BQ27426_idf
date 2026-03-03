@@ -1,8 +1,20 @@
 #include "TiFuelGauge.h"
+#include "i2c_bus.h"
 #include <string.h>
 #include <stdio.h>
 
 const char* TiFuelGauge::TAG = "TiFuelGauge";
+
+// choose a consistent bus speed for this device
+#ifndef BQ27426_I2C_FREQ_HZ
+#define BQ27426_I2C_FREQ_HZ 100000
+#endif
+
+// Helper: get cached dev handle (returns NULL if bus not init / cache full)
+static inline i2c_master_dev_handle_t fg_dev()
+{
+    return i2c_bus_get_dev(BQ27426_I2C_ADDRESS, BQ27426_I2C_FREQ_HZ);
+}
 
 TiFuelGauge::TiFuelGauge() : i2c_port(BQ27426_I2C_MASTER_NUM), initialized(false) {
 }
@@ -10,78 +22,72 @@ TiFuelGauge::TiFuelGauge() : i2c_port(BQ27426_I2C_MASTER_NUM), initialized(false
 TiFuelGauge::~TiFuelGauge() {
 }
 
-bool TiFuelGauge::is_connected() {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (BQ27426_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_stop(cmd);
-    
-    esp_err_t ret = i2c_master_cmd_begin(i2c_port, cmd, pdMS_TO_TICKS(BQ27426_I2C_MASTER_TIMEOUT_MS));
-    i2c_cmd_link_delete(cmd);
-    
+// Methods below coded to use the i2c_bus component
+bool TiFuelGauge::is_connected()
+{
+    i2c_master_dev_handle_t dev = fg_dev();
+    if (!dev) {
+        ESP_LOGI(TAG, "Connection test: FAILED (no dev handle) addr=0x%02X", BQ27426_I2C_ADDRESS);
+        return false;
+    }
+
+    // "Ping" with a minimal valid transaction. Some devices NACK dummy reads/writes,
+    // but fuel gauges typically respond to a register-pointer read.
+    // We'll read 1 byte from CONTROL (0x00) by doing transmit_receive(reg, read1).
+    uint8_t reg = BQ27426_CONTROL;
+    uint8_t byte = 0;
+    esp_err_t ret = i2c_master_transmit_receive(dev, &reg, 1, &byte, 1, BQ27426_I2C_MASTER_TIMEOUT_MS);
+
     bool connected = (ret == ESP_OK);
     ESP_LOGI(TAG, "Connection test: %s (I2C address 0x%02X)", connected ? "SUCCESS" : "FAILED", BQ27426_I2C_ADDRESS);
     if (!connected) {
         ESP_LOGI(TAG, "I2C connection error: %s", esp_err_to_name(ret));
     }
-    
     return connected;
 }
 
-esp_err_t TiFuelGauge::i2c_master_read_register(uint8_t reg, uint8_t* data, size_t len) {
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    
-    // Write register address
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (BQ27426_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, reg, true);
-    
-    // Read data
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (BQ27426_I2C_ADDRESS << 1) | I2C_MASTER_READ, true);
-    
-    if (len > 1) {
-        i2c_master_read(cmd, data, len - 1, I2C_MASTER_ACK);
-    }
-    i2c_master_read_byte(cmd, data + len - 1, I2C_MASTER_NACK);
-    i2c_master_stop(cmd);
-    
-    esp_err_t ret = i2c_master_cmd_begin(i2c_port, cmd, pdMS_TO_TICKS(BQ27426_I2C_MASTER_TIMEOUT_MS));
-    i2c_cmd_link_delete(cmd);
-    
-    return ret;
+esp_err_t TiFuelGauge::i2c_master_read_register(uint8_t reg, uint8_t *data, size_t len)
+{
+    if (!data || len == 0) return ESP_ERR_INVALID_ARG;
+
+    i2c_master_dev_handle_t dev = fg_dev();
+    if (!dev) return ESP_ERR_INVALID_STATE;
+
+    // Write register pointer, then read N bytes back
+    return i2c_master_transmit_receive(dev, &reg, 1, data, len, BQ27426_I2C_MASTER_TIMEOUT_MS);
 }
 
-esp_err_t TiFuelGauge::i2c_master_write_register(uint8_t reg, uint16_t value) {
-    uint8_t data[3] = {reg, (uint8_t)(value & 0xFF), (uint8_t)((value >> 8) & 0xFF)};
-    
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (BQ27426_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write(cmd, data, 3, true);
-    i2c_master_stop(cmd);
-    
-    esp_err_t ret = i2c_master_cmd_begin(i2c_port, cmd, pdMS_TO_TICKS(BQ27426_I2C_MASTER_TIMEOUT_MS));
-    i2c_cmd_link_delete(cmd);
-    
-    return ret;
+esp_err_t TiFuelGauge::i2c_master_write_register(uint8_t reg, uint16_t value)
+{
+    i2c_master_dev_handle_t dev = fg_dev();
+    if (!dev) return ESP_ERR_INVALID_STATE;
+
+    // BQ27426 expects LSB first then MSB for 16-bit registers
+    uint8_t buf[3] = {
+        reg,
+        (uint8_t)(value & 0xFF),
+        (uint8_t)((value >> 8) & 0xFF),
+    };
+
+    return i2c_master_transmit(dev, buf, sizeof(buf), BQ27426_I2C_MASTER_TIMEOUT_MS);
 }
 
-uint16_t TiFuelGauge::read_register(uint8_t reg) {
-    uint8_t data[2];
-    esp_err_t ret = i2c_master_read_register(reg, data, 2);
-    
+uint16_t TiFuelGauge::read_register(uint8_t reg)
+{
+    uint8_t data[2] = {0, 0};
+    esp_err_t ret = i2c_master_read_register(reg, data, sizeof(data));
+
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to read register 0x%02X: %s", reg, esp_err_to_name(ret));
         return 0xFFFF;
     }
-    
-    // TI Fuel Gauge returns LSB first, then MSB (same as BQ27426)
-    uint16_t value = (data[1] << 8) | data[0];
-    return value;
+
+    // TI Fuel Gauge returns LSB first, then MSB
+    return (uint16_t)((data[1] << 8) | data[0]);
 }
 
-bool TiFuelGauge::write_register(uint8_t reg, uint16_t value) {
+bool TiFuelGauge::write_register(uint8_t reg, uint16_t value)
+{
     esp_err_t ret = i2c_master_write_register(reg, value);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to write register 0x%02X: %s", reg, esp_err_to_name(ret));
@@ -90,6 +96,43 @@ bool TiFuelGauge::write_register(uint8_t reg, uint16_t value) {
     return true;
 }
 
+
+
+uint8_t TiFuelGauge::read_data_memory_byte(uint8_t address)
+{
+    uint8_t data = 0;
+    esp_err_t ret = i2c_master_read_register(address, &data, 1);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read data memory byte at 0x%02X: %s", address, esp_err_to_name(ret));
+        return 0xFF;
+    }
+    return data;
+}
+
+bool TiFuelGauge::write_data_memory_byte(uint8_t address, uint8_t value)
+{
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    i2c_master_dev_handle_t dev = fg_dev();
+    if (!dev) return false;
+
+    // reg + value
+    uint8_t buf[2] = { address, value };
+    esp_err_t ret = i2c_master_transmit(dev, buf, sizeof(buf), BQ27426_I2C_MASTER_TIMEOUT_MS);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to write data memory byte 0x%02X to 0x%02X: %s",
+                 value, address, esp_err_to_name(ret));
+        if (!is_connected()) {
+            ESP_LOGE(TAG, "Device connection lost during data memory write");
+        }
+        return false;
+    }
+
+    ESP_LOGD(TAG, "Successfully wrote 0x%02X to address 0x%02X", value, address);
+    return true;
+}
+// Upper methods coded to use the i2c_bus component
 bool TiFuelGauge::write_control_command(uint16_t command) {
     return write_register(BQ27426_CONTROL, command);
 }
@@ -296,46 +339,6 @@ bool TiFuelGauge::force_exit_config_mode() {
     ESP_LOGE(TAG, "Force exit failed - device may need power cycle");
     debug_print_status();
     return false;
-}
-
-uint8_t TiFuelGauge::read_data_memory_byte(uint8_t address) {
-    uint8_t data;
-    esp_err_t ret = i2c_master_read_register(address, &data, 1);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to read data memory byte at 0x%02X: %s", address, esp_err_to_name(ret));
-        return 0xFF;
-    }
-    return data;
-}
-
-bool TiFuelGauge::write_data_memory_byte(uint8_t address, uint8_t value) {
-    // Add small delay before write to ensure device is ready
-    vTaskDelay(pdMS_TO_TICKS(10));
-    
-    // For data memory writes, we need exactly 2 bytes: register + value
-    // Following specs format: 0xAA register value
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);
-    i2c_master_write_byte(cmd, (BQ27426_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, address, true);
-    i2c_master_write_byte(cmd, value, true);
-    i2c_master_stop(cmd);
-    
-    esp_err_t ret = i2c_master_cmd_begin(i2c_port, cmd, pdMS_TO_TICKS(BQ27426_I2C_MASTER_TIMEOUT_MS));
-    i2c_cmd_link_delete(cmd);
-    
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to write data memory byte 0x%02X to 0x%02X: %s", value, address, esp_err_to_name(ret));
-        
-        // Check if device is still connected
-        if (!is_connected()) {
-            ESP_LOGE(TAG, "Device connection lost during data memory write");
-        }
-        return false;
-    }
-    
-    ESP_LOGD(TAG, "Successfully wrote 0x%02X to address 0x%02X", value, address);
-    return true;
 }
 
 uint8_t TiFuelGauge::calculate_checksum_update(uint8_t old_checksum, uint8_t old_value, uint8_t new_value) {
