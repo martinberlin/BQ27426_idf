@@ -234,54 +234,65 @@ class TiFuelGauge {
 public:
     TiFuelGauge();
     ~TiFuelGauge();
-    
+
+    // Initialize shared I2C bus and verify the gauge is reachable.
+    // Call once at startup (recommended).
+    bool begin(int sda_gpio, int scl_gpio, uint32_t freq_hz = 100000);
+
+    // Optional helper
+    bool is_initialized() const { return initialized; }
+
     // Device identification
     uint16_t read_device_type();
     ti_fuel_gauge_chem_id_t read_chemical_id();
     uint16_t read_control_status();
-    
+
     // Battery measurements
     uint16_t read_voltage();           // Voltage in mV
     int16_t read_average_current();    // Average current in mA
     int16_t read_average_power();      // Average power in mW
     uint16_t read_state_of_charge();   // State of charge in %
     uint16_t read_full_capacity();     // Full available capacity in mAh
-    
+
     // Basic I2C communication
     bool is_connected();
-    
+
     // Status utilities
     const char* control_status_to_string(uint16_t status);
     void debug_print_status();
-    
+
     // Control functions
     bool reset();
-    
+
     // Configuration management
     bool enter_config_update_mode();
     bool exit_config_update_mode();
     bool is_config_update_mode();
     bool force_exit_config_mode();  // Emergency exit function
-    
+
     // Parameter configuration
     bool set_design_capacity(uint16_t capacity_mah);
     bool set_chemistry_profile(ti_fuel_gauge_chem_id_t profile);
     uint16_t read_design_capacity_from_memory(); // Read design capacity from data memory
 
     bool enter_shutdown();
+
 private:
     static const char* TAG;
     bool initialized;
-    
+
+    // NEW: store device bus speed chosen at begin()
+    uint32_t i2c_freq_hz;
+
     // Low-level I2C functions
     esp_err_t i2c_master_read_register(uint8_t reg, uint8_t* data, size_t len);
     esp_err_t i2c_master_write_register(uint8_t reg, uint16_t value);
-    
+
     // Register access functions
     uint16_t read_register(uint8_t reg);
     bool write_register(uint8_t reg, uint16_t value);
     bool write_control_command(uint16_t command);
-    
+
     // Data memory access helpers
     uint8_t read_data_memory_byte(uint8_t address);
     bool write_data_memory_byte(uint8_t address, uint8_t value);
