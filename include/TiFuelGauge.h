@@ -271,7 +271,6 @@ public:
     bool enter_shutdown();
 private:
     static const char* TAG;
-    i2c_port_t i2c_port;
     bool initialized;
     
     // Low-level I2C functions

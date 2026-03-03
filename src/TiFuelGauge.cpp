@@ -16,7 +16,7 @@ static inline i2c_master_dev_handle_t fg_dev()
     return i2c_bus_get_dev(BQ27426_I2C_ADDRESS, BQ27426_I2C_FREQ_HZ);
 }
 
-TiFuelGauge::TiFuelGauge() : i2c_port(BQ27426_I2C_MASTER_NUM), initialized(false) {
+TiFuelGauge::TiFuelGauge() : initialized(false) {
 }
 
 TiFuelGauge::~TiFuelGauge() {
